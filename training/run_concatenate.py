@@ -207,7 +207,7 @@ def main():
             raw_datasets[split] = raw_datasets[split].select(range(data_args.max_samples_per_split))
 
     if speaker_id_column_name is not None:
-        raw_datasets = raw_datasets.sort(speaker_id_column_name)
+        raw_datasets = raw_datasets.sort([speaker_id_column_name, id_column_name])
 
     def concatenate_dataset(batch):
         audio = [sample["array"] for sample in batch[audio_column_name]]
@@ -219,7 +219,6 @@ def main():
         concatenated_audio = []
         concatenated_text = []
         concatenated_speaker = []
-        condition_on_prev = []
 
         def get_timestamp(s, p=0.02):
             return "<|%.2f|>" % (int(s / p)*p)
@@ -271,7 +270,6 @@ def main():
                     concatenated_audio.append(audio_sample)
                     concatenated_text.append(text_sample)
                     concatenated_speaker.append(speaker)
-                    condition_on_prev.append(0)
                     audio_sample = audio[idx]
                     end_ts = len(audio_sample) / sampling_rate
                     text_sample = get_timestamped_text(text[idx], get_start(audio_sample), end_ts)
@@ -281,7 +279,6 @@ def main():
                 concatenated_audio.append(audio_sample)
                 concatenated_text.append(text_sample)
                 concatenated_speaker.append(speaker)
-                condition_on_prev.append(1)
                 audio_sample = audio[idx]
                 end_ts = len(audio_sample) / sampling_rate
                 text_sample = get_timestamped_text(text[idx], get_start(audio_sample), end_ts)
@@ -289,8 +286,10 @@ def main():
         batch[audio_column_name] = [{"array": array, "sampling_rate": sampling_rate} for array in concatenated_audio]
         batch[text_column_name] = concatenated_text
         batch[id_column_name] = concatenated_speaker
-        batch["condition_on_prev"] = condition_on_prev
-
+        batch["condition_on_prev"] = [False] + [
+            a == b
+            for a, b in zip(concatenated_speaker[:-1], concatenated_speaker[1:])
+        ]
         return batch
 
     raw_datasets_features = list(next(iter(raw_datasets.values())).features.keys())
