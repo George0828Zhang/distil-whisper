@@ -237,15 +237,22 @@ def main():
             return out[1][0]
 
         def concat_with_silence(utt1, utt2, sil):
-            sil = min(int(sil/2), len(utt1), len(utt2))
+            sil = int(sil/2)
+            if sil < 1:
+                return np.concatenate([utt1, utt2])
+            silencel = utt1[-sil:]
+            silencer = utt2[:sil]
             true_sil = np.zeros(sil, dtype=utt1.dtype)
+            if len(silencel) < sil:
+                silencel = np.concatenate([silencel, true_sil[:sil - len(silencel)]])
+            if len(silencer) < sil:
+                silencer = np.concatenate([true_sil[:sil - len(silencer)], silencer])
 
             weight = np.linspace(1, 0, sil)
-            silence1 = utt1[-sil:] * weight + true_sil * (1 - weight)
-            silence2 = true_sil * weight + utt2[:sil] * (1 - weight)
+            silence1 = silencel * weight + true_sil * (1 - weight)
+            silence2 = true_sil * weight + silencer * (1 - weight)
 
-            out = np.concatenate([utt1, silence1, silence2, utt2])
-            return out
+            return np.concatenate([utt1, silence1, silence2, utt2])
 
 
         audio_sample = audio[0]
@@ -286,9 +293,9 @@ def main():
         batch[audio_column_name] = [{"array": array, "sampling_rate": sampling_rate} for array in concatenated_audio]
         batch[text_column_name] = concatenated_text
         batch[id_column_name] = concatenated_speaker
-        batch["condition_on_prev"] = [False] + [
-            a == b
-            for a, b in zip(concatenated_speaker[:-1], concatenated_speaker[1:])
+        batch["condition_on_prev"] = [""] + [
+            (t if a == b else "")
+            for t, a, b in zip(concatenated_text[:-1], concatenated_speaker[:-1], concatenated_speaker[1:])
         ]
         return batch
 
