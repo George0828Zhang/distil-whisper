@@ -19,6 +19,7 @@ Pseudo-labelling audio data using the Whisper model in preparation for distillat
 # You can also adapt this script for your own pseudo-labelling tasks. Pointers for this are left as comments.
 
 import logging
+import re
 import os
 import sys
 from dataclasses import dataclass, field
@@ -94,6 +95,18 @@ class DataTrainingArguments:
     speaker_id_column_name: str = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the speaker id data. Defaults to None."},
+    )
+    randomize_same_speaker: bool = field(
+        default=False,
+        metadata={"help": "Randomize utterances within the same speaker before concatenation. Should be True for CV16."},
+    )
+    random_seed: int = field(
+        default=1877,
+        metadata={"help": "Random seed for randomize_same_speaker"},
+    )
+    max_silence_in_seconds: float = field(
+        default=2.0,
+        metadata={"help": "Add `0` to `max_silence_in_seconds` seconds of silence between concatenated utterances."},
     )
     max_duration_in_seconds: float = field(
         default=30.0,
@@ -201,13 +214,21 @@ def main():
     text_column_name = data_args.text_column_name
     id_column_name = data_args.id_column_name
     speaker_id_column_name = data_args.speaker_id_column_name
+    randomize_same_speaker = data_args.randomize_same_speaker
+    random_seed = data_args.random_seed
+    max_silence_in_seconds = data_args.max_silence_in_seconds
 
     if data_args.max_samples_per_split is not None:
         for split in data_splits:
             raw_datasets[split] = raw_datasets[split].select(range(data_args.max_samples_per_split))
 
     if speaker_id_column_name is not None:
-        raw_datasets = raw_datasets.sort([speaker_id_column_name, id_column_name])
+        if randomize_same_speaker:
+            raw_datasets = raw_datasets.shuffle(seed=random_seed)
+            sort_keys = [speaker_id_column_name]
+        else:
+            sort_keys = [speaker_id_column_name, id_column_name]
+        raw_datasets = raw_datasets.sort(sort_keys)
 
     def concatenate_dataset(batch):
         audio = [sample["array"] for sample in batch[audio_column_name]]
@@ -224,6 +245,7 @@ def main():
             return "<|%.2f|>" % (int(s / p)*p)
         
         def get_timestamped_text(t, start, end):
+            t = re.sub(r"^([A-Za-z])", r" \1", t)
             return f"{get_timestamp(start)}{t}{get_timestamp(end)}"
         
         def get_start(audio):
@@ -240,20 +262,8 @@ def main():
             sil = int(sil/2)
             if sil < 1:
                 return np.concatenate([utt1, utt2])
-            silencel = utt1[-sil:]
-            silencer = utt2[:sil]
             true_sil = np.zeros(sil, dtype=utt1.dtype)
-            if len(silencel) < sil:
-                silencel = np.concatenate([silencel, true_sil[:sil - len(silencel)]])
-            if len(silencer) < sil:
-                silencer = np.concatenate([true_sil[:sil - len(silencer)], silencer])
-
-            weight = np.linspace(1, 0, sil)
-            silence1 = silencel * weight + true_sil * (1 - weight)
-            silence2 = true_sil * weight + silencer * (1 - weight)
-
-            return np.concatenate([utt1, silence1, silence2, utt2])
-
+            return np.concatenate([utt1, true_sil, utt2])
 
         audio_sample = audio[0]
         end_ts = len(audio_sample) / sampling_rate
@@ -262,7 +272,7 @@ def main():
         for idx in range(1, len(audio)):
             prev_speaker = speaker_id[idx - 1]
             speaker = speaker_id[idx]
-            sil_samples = np.random.rand() * sampling_rate
+            sil_samples = np.random.rand() * sampling_rate * max_silence_in_seconds
 
             if len(audio_sample) + input_lengths[idx] + sil_samples <= max_input_length:
                 if speaker == prev_speaker:
