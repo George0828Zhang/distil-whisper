@@ -245,6 +245,8 @@ def main():
             return "<|%.2f|>" % (int(s / p)*p)
         
         def get_timestamped_text(t, start, end):
+            if t.strip() == "":
+                return ""
             t = re.sub(r"^([A-Za-z])", r" \1", t)
             return f"{get_timestamp(start)}{t}{get_timestamp(end)}"
         
