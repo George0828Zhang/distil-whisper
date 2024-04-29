@@ -35,6 +35,7 @@ from datasets import (
 from huggingface_hub import HfFolder
 from transformers import HfArgumentParser
 from transformers.utils.versions import require_version
+from datasets_utils import save_to_disk_as_parquet
 
 
 require_version("datasets>=2.14.6", "To fix: `pip install --upgrade datasets`")
@@ -309,6 +310,7 @@ def main():
             (t if a == b else "")
             for t, a, b in zip(concatenated_text[:-1], concatenated_speaker[:-1], concatenated_speaker[1:])
         ]
+        batch["duration"] = [len(array) / sampling_rate for array in concatenated_audio]
         return batch
 
     raw_datasets_features = list(next(iter(raw_datasets.values())).features.keys())
@@ -319,7 +321,7 @@ def main():
         batch_size=preprocessing_batch_size,
         num_proc=num_workers,
         remove_columns=set(raw_datasets_features)
-        - {audio_column_name, text_column_name, id_column_name, "condition_on_prev"},
+        - {audio_column_name, text_column_name, id_column_name, "condition_on_prev", "duration"},
         desc="Concatenating dataset...",
     )
 
@@ -331,7 +333,7 @@ def main():
     def postprocess_ids(speaker_ids, indices):
         speaker_ids_formatted = []
         for speaker, idx in zip(speaker_ids, indices):
-            formatted_idx = f"{pretty_name}-{speaker}-{idx}" if speaker is not None else f"{pretty_name}-{idx}"
+            formatted_idx = f"{pretty_name}-{speaker}-{idx:03d}" if speaker is not None else f"{pretty_name}-{idx:03d}"
             speaker_ids_formatted.append(formatted_idx)
         return {id_column_name: speaker_ids_formatted}
 
@@ -345,11 +347,8 @@ def main():
         num_proc=num_workers,
     )
 
-    output_dir = data_args.output_dir
     # this is where we'll save our transcriptions
-    os.makedirs(output_dir, exist_ok=True)
-
-    raw_datasets.save_to_disk(output_dir, num_proc=num_workers)
+    save_to_disk_as_parquet(raw_datasets, data_args.output_dir, max_shard_size='1GB')
 
 if __name__ == "__main__":
     main()
