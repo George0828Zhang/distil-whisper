@@ -22,6 +22,7 @@ import logging
 import re
 import os
 import sys
+import random
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -96,6 +97,14 @@ class DataTrainingArguments:
     speaker_id_column_name: str = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the speaker id data. Defaults to None."},
+    )
+    augmentation: bool = field(
+        default=False,
+        metadata={"help": "Do audio augmentation"},
+    )
+    augmentation_length_change: bool = field(
+        default=False,
+        metadata={"help": "Do audio augmentation with TimeStretch that could alter overall length."},
     )
     randomize_same_speaker: bool = field(
         default=False,
@@ -219,6 +228,9 @@ def main():
     random_seed = data_args.random_seed
     max_silence_in_seconds = data_args.max_silence_in_seconds
 
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+
     if data_args.max_samples_per_split is not None:
         for split in data_splits:
             raw_datasets[split] = raw_datasets[split].select(range(data_args.max_samples_per_split))
@@ -231,8 +243,51 @@ def main():
             sort_keys = [speaker_id_column_name, id_column_name]
         raw_datasets = raw_datasets.sort(sort_keys)
 
+    augmentation_length_change = data_args.augmentation_length_change
+    if data_args.augmentation:
+        from audiomentations import (
+            AddBackgroundNoise,
+            AddGaussianNoise,
+            Compose,
+            Gain,
+            OneOf,
+            PitchShift,
+            PolarityInversion,
+            TimeStretch,
+            TanhDistortion,
+            Mp3Compression
+        )
+        # define augmentation
+        aug_p = 0.45
+        augmentation_fn = Compose(
+            [
+                TimeStretch(min_rate=0.9, max_rate=1.1, p=aug_p, leave_length_unchanged=not augmentation_length_change),
+                Gain(min_gain_in_db=-6, max_gain_in_db=6, p=aug_p),
+                PitchShift(min_semitones=-4, max_semitones=4, p=aug_p),
+                OneOf(
+                    [
+                        TanhDistortion(p=1.0),
+                        Mp3Compression(p=1.0),
+                        AddGaussianNoise(min_amplitude=0.005, max_amplitude=0.015, p=1.0),
+                    ],
+                    p=aug_p,
+                ),
+            ]
+        )
+    else:
+        augmentation_fn = None
+
     def concatenate_dataset(batch):
-        audio = [sample["array"] for sample in batch[audio_column_name]]
+
+        def maybe_augment(sample):
+            array = sample["array"].astype(np.float32)
+            if len(array) <= sampling_rate or augmentation_fn is None:
+                return array  # only augment at least 1 second
+            out = augmentation_fn(array, sample_rate=sample["sampling_rate"])
+            assert 0.9 < len(out)/len(array) < 1.1 or augmentation_length_change
+            return np.pad(out, (0, max(0, len(array) - len(out))), mode='constant', constant_values=0)[:len(array)]
+
+        audio = list(map(maybe_augment, batch[audio_column_name]))
         input_lengths = [len(sample) for sample in audio]
 
         text = batch[text_column_name]
@@ -348,7 +403,7 @@ def main():
     )
 
     # this is where we'll save our transcriptions
-    save_to_disk_as_parquet(raw_datasets, data_args.output_dir, max_shard_size='1GB')
+    save_to_disk_as_parquet(raw_datasets, data_args.output_dir, config_name="augment" if data_args.augmentation else "default", max_shard_size='1GB')
 
 if __name__ == "__main__":
     main()
