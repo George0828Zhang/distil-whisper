@@ -15,7 +15,7 @@ def load_readme(path):
 
 def dump_readme(data, path):
     with open(path, "w") as f:
-        yaml_data = f"---\n{yaml.dump(data)}\n---"
+        yaml_data = f"---\n{yaml.dump(data).strip()}\n---"
         f.write(yaml_data)
 
 def save_to_disk_as_parquet(dataset, data_dir, config_name="default", split='train', max_shard_size='1GB'):
@@ -30,10 +30,10 @@ def save_to_disk_as_parquet(dataset, data_dir, config_name="default", split='tra
             save_to_disk_as_parquet(dataset[split], data_dir / config_dir, split=split, max_shard_size=max_shard_size)
         try:
             data = load_readme(data_dir / "README.md")
-        except FileNotFoundError:
+        except (FileNotFoundError, AttributeError):
             data = dict(configs=[])
 
-        data['configs'].append(dict(
+        data.get('configs', []).append(dict(
             config_name=config_name,
             data_files=[
                 dict(split=split, path=f'{config_dir}/{split}-*')

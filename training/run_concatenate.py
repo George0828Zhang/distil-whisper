@@ -28,10 +28,13 @@ from typing import Optional
 
 import datasets
 import numpy as np
+import torch
+import torchaudio
 import transformers
 from datasets import (
     DatasetDict,
     load_dataset,
+    disable_caching
 )
 from huggingface_hub import HfFolder
 from transformers import HfArgumentParser
@@ -105,6 +108,10 @@ class DataTrainingArguments:
     augmentation_length_change: bool = field(
         default=False,
         metadata={"help": "Do audio augmentation with TimeStretch that could alter overall length."},
+    )
+    augmentation_noise_dir: str = field(
+        default=None,
+        metadata={"help": "Directory to noise data such as MUSAN."},
     )
     randomize_same_speaker: bool = field(
         default=False,
@@ -227,6 +234,20 @@ def main():
     randomize_same_speaker = data_args.randomize_same_speaker
     random_seed = data_args.random_seed
     max_silence_in_seconds = data_args.max_silence_in_seconds
+    augmentation_length_change = data_args.augmentation_length_change
+    augmentation_noise_dir = data_args.augmentation_noise_dir
+
+    logger.info("Random seed = %d", random_seed)
+    logger.info("Random order = %s", randomize_same_speaker)
+    logger.info("Silence = %.2f", max_silence_in_seconds)
+    logger.info("Augmentation = %s", data_args.augmentation)
+    if data_args.augmentation:
+        logger.info("Length change = %s", augmentation_length_change)
+        logger.info("Noise dir = %s", augmentation_noise_dir)
+        
+
+    if data_args.overwrite_cache:
+        disable_caching()
 
     random.seed(random_seed)
     np.random.seed(random_seed)
@@ -243,51 +264,59 @@ def main():
             sort_keys = [speaker_id_column_name, id_column_name]
         raw_datasets = raw_datasets.sort(sort_keys)
 
-    augmentation_length_change = data_args.augmentation_length_change
     if data_args.augmentation:
         from audiomentations import (
             AddBackgroundNoise,
-            AddGaussianNoise,
+            AddGaussianSNR,
             Compose,
             Gain,
             OneOf,
             PitchShift,
             PolarityInversion,
-            TimeStretch,
-            TanhDistortion,
             Mp3Compression
         )
         # define augmentation
         aug_p = 0.45
+        speed_perturb_transform = torchaudio.transforms.SpeedPerturbation(sampling_rate, [0.9, 1.1, 1.0, 1.0, 1.0])
+        def speed_perturb(x, **kwargs):
+            if expand:=len(x.shape) < 2:
+                x = x[None]
+            out = speed_perturb_transform(torch.from_numpy(x))[0].numpy()
+            if expand:
+                out = out[0]
+            return out
+
+        augmentation_fn_per = speed_perturb
         augmentation_fn = Compose(
             [
-                TimeStretch(min_rate=0.9, max_rate=1.1, p=aug_p, leave_length_unchanged=not augmentation_length_change),
                 Gain(min_gain_in_db=-6, max_gain_in_db=6, p=aug_p),
                 PitchShift(min_semitones=-4, max_semitones=4, p=aug_p),
                 OneOf(
                     [
-                        TanhDistortion(p=1.0),
-                        Mp3Compression(p=1.0),
-                        AddGaussianNoise(min_amplitude=0.005, max_amplitude=0.015, p=1.0),
+                        AddBackgroundNoise(sounds_path=augmentation_noise_dir, min_snr_in_db=1.0, max_snr_in_db=5.0, noise_transform=PolarityInversion(), p=1.0),
+                        AddGaussianSNR(min_snr_in_db=1.0, max_snr_in_db=5.0, p=1.0),
                     ],
                     p=aug_p,
-                ),
+                ) if augmentation_noise_dir else AddGaussianSNR(min_snr_in_db=1.0, max_snr_in_db=5.0, p=aug_p),
+                Mp3Compression(min_bitrate=16, p=aug_p)
             ]
         )
     else:
-        augmentation_fn = None
+        augmentation_fn_per = augmentation_fn = None
 
     def concatenate_dataset(batch):
 
-        def maybe_augment(sample):
-            array = sample["array"].astype(np.float32)
-            if len(array) <= sampling_rate or augmentation_fn is None:
+        def maybe_augment(array, func):
+            array = array.astype(np.float32)
+            if len(array) <= sampling_rate or func is None:
                 return array  # only augment at least 1 second
-            out = augmentation_fn(array, sample_rate=sample["sampling_rate"])
+            out = func(array, sample_rate=sampling_rate)
             assert 0.9 < len(out)/len(array) < 1.1 or augmentation_length_change
-            return np.pad(out, (0, max(0, len(array) - len(out))), mode='constant', constant_values=0)[:len(array)]
+            if not augmentation_length_change and len(out) != len(array):
+                out = np.pad(out, (0, max(0, len(array) - len(out))), mode='constant', constant_values=0)[:len(array)]
+            return out
 
-        audio = list(map(maybe_augment, batch[audio_column_name]))
+        audio = [maybe_augment(sample['array'], augmentation_fn_per) for sample in batch[audio_column_name]]
         input_lengths = [len(sample) for sample in audio]
 
         text = batch[text_column_name]
@@ -344,7 +373,7 @@ def main():
                     # speakers do not follow sequentially, save the audio and start looping again
                     concatenated_audio.append(audio_sample)
                     concatenated_text.append(text_sample)
-                    concatenated_speaker.append(speaker)
+                    concatenated_speaker.append(prev_speaker)
                     audio_sample = audio[idx]
                     end_ts = len(audio_sample) / sampling_rate
                     text_sample = get_timestamped_text(text[idx], get_start(audio_sample), end_ts)
@@ -353,12 +382,17 @@ def main():
                 # concatenated audio exceeds max length, save the audio and start looping again
                 concatenated_audio.append(audio_sample)
                 concatenated_text.append(text_sample)
-                concatenated_speaker.append(speaker)
+                concatenated_speaker.append(prev_speaker)
                 audio_sample = audio[idx]
                 end_ts = len(audio_sample) / sampling_rate
                 text_sample = get_timestamped_text(text[idx], get_start(audio_sample), end_ts)
 
-        batch[audio_column_name] = [{"array": array, "sampling_rate": sampling_rate} for array in concatenated_audio]
+        # add the remaining audio
+        concatenated_audio.append(audio_sample)
+        concatenated_text.append(text_sample)
+        concatenated_speaker.append(speaker)
+ 
+        batch[audio_column_name] = [{"array": maybe_augment(array, augmentation_fn), "sampling_rate": sampling_rate} for array in concatenated_audio]
         batch[text_column_name] = concatenated_text
         batch[id_column_name] = concatenated_speaker
         batch["condition_on_prev"] = [""] + [
