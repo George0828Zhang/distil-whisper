@@ -65,6 +65,7 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer, EnglishTextNormalizer
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
+from .normalizer import ChineseTextNormalizer
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -1064,12 +1065,13 @@ def main():
     dataloader_num_workers = training_args.dataloader_num_workers
     prefetch_factor = training_args.dataloader_prefetch_factor
 
-    metric = evaluate.load("wer")
-    normalizer = (
-        BasicTextNormalizer()
-        if data_args.language is not None
-        else EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
-    )
+    metric = evaluate.load("mer.py")
+    if data_args.language is None:
+        normalizer = EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
+    elif data_args.language in ["zh", "chinese"]:
+        normalizer = ChineseTextNormalizer()
+    else:
+        normalizer = BasicTextNormalizer()
     wer_threshold = data_args.wer_threshold
     use_pseudo_labels = data_args.use_pseudo_labels
     train_text_column_name = "whisper_transcript" if use_pseudo_labels else "text"
