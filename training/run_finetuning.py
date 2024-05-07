@@ -65,11 +65,12 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer, EnglishTextNormalizer
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
+import schedulefree
 from .normalizer import ChineseTextNormalizer
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.34.0.dev0")
+# check_min_version("4.34.0.dev0")
 
 require_version("datasets>=2.14.6", "To fix: `pip install --upgrade datasets`")
 
@@ -374,6 +375,14 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             "help": (
                 "The data type (dtype) in which to run training. One of `float32` (full-precision), "
                 "`float16` or `bfloat16` (both half-precision)."
+            )
+        },
+    )
+    use_schedulefree: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to use schedulefree AdamW for easier convergence."
             )
         },
     )
@@ -1356,20 +1365,35 @@ def main():
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(
-        params=optimizer_grouped_parameters,
-        lr=training_args.learning_rate,
-        betas=(training_args.adam_beta1, training_args.adam_beta2),
-        eps=training_args.adam_epsilon,
-    )
+    
+    if training_args.use_schedulefree:
+        optimizer = schedulefree.AdamWScheduleFree(
+            optimizer_grouped_parameters,
+            lr=training_args.learning_rate,
+            betas=(training_args.adam_beta1, training_args.adam_beta2),
+            eps=training_args.adam_epsilon,
+            warmup_steps=training_args.warmup_steps * accelerator.num_processes,
+        )
+        class DummySched(nn.Module):
+            step = lambda: None
+            get_last_lr = lambda: [training_args.learning_rate]
 
-    # LR scheduler gets stepped by `num_processes` each time -> account for this in warmup / total steps
-    lr_scheduler = get_scheduler(
-        name=training_args.lr_scheduler_type,
-        optimizer=optimizer,
-        num_warmup_steps=training_args.warmup_steps * accelerator.num_processes,
-        num_training_steps=total_train_steps * accelerator.num_processes,
-    )
+        lr_scheduler = DummySched()
+    else:
+        optimizer = torch.optim.AdamW(
+            params=optimizer_grouped_parameters,
+            lr=training_args.learning_rate,
+            betas=(training_args.adam_beta1, training_args.adam_beta2),
+            eps=training_args.adam_epsilon,
+        )
+
+        # LR scheduler gets stepped by `num_processes` each time -> account for this in warmup / total steps
+        lr_scheduler = get_scheduler(
+            name=training_args.lr_scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=training_args.warmup_steps * accelerator.num_processes,
+            num_training_steps=total_train_steps * accelerator.num_processes,
+        )
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
         processor=processor,
@@ -1406,17 +1430,6 @@ def main():
     student_model, optimizer, lr_scheduler = accelerator.prepare(
         student_model, optimizer, lr_scheduler
     )
-
-    def kl_divergence(target_distribution, log_predicted_distribution, labels):
-        kl_loss = nn.KLDivLoss(reduction="none")
-        divergence = kl_loss(log_predicted_distribution, target_distribution)
-        # ignore padded tokens from divergence, i.e. where labels are not set to -100
-        padding_mask = labels >= 0
-        padding_mask = padding_mask.unsqueeze(-1)
-        divergence = divergence * padding_mask
-        # take the average over the mini-batch
-        divergence = divergence.sum() / padding_mask.sum()
-        return divergence
 
     # Define gradient update step fn
     def train_step(batch):
