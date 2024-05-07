@@ -34,6 +34,7 @@ import evaluate
 import numpy as np
 import torch
 import torch.nn as nn
+import pandas as pd
 import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -486,31 +487,38 @@ def log_pred(
 ):
     """Helper function to log target/predicted transcriptions to weights and biases (wandb)."""
     if accelerator.is_main_process:
-        wandb_tracker = accelerator.get_tracker("wandb")
         # pretty name for current step: step 50000 -> step 50k
         cur_step_pretty = f"{int(step // 1000)}k" if step > 1000 else step
         prefix_pretty = prefix.replace("/", "-")
-
         # convert str data to a wandb compatible format
-        str_data = [[label_str[i], pred_str[i], norm_label_str[i], norm_pred_str[i]] for i in range(len(pred_str))]
-        # log as a table with the appropriate headers
-        wandb_tracker.log_table(
-            table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
-            columns=["Target", "Pred", "Norm Target", "Norm Pred"],
-            data=str_data[:num_lines],
-            step=step,
-        )
+        df = pd.DataFrame({
+            "Target": label_str,
+            "Pred": pred_str,
+            "Norm Target": norm_label_str,
+            "Norm Pred": norm_pred_str,
+        })
 
-        # log incorrect normalised predictions
-        str_data = np.asarray(str_data)
-        str_data_incorrect = str_data[str_data[:, -2] != str_data[:, -1]]
-        # log as a table with the appropriate headers
-        wandb_tracker.log_table(
-            table_name=f"incorrect_predictions/{prefix_pretty}-step-{cur_step_pretty}",
-            columns=["Target", "Pred", "Norm Target", "Norm Pred"],
-            data=str_data_incorrect[:num_lines],
-            step=step,
-        )
+        for name in ["wandb", "clearml"]:
+            try:
+                tracker = accelerator.get_tracker(name)
+            except ValueError:
+                continue
+        
+            # log as a table with the appropriate headers
+            tracker.log_table(
+                table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
+                dataframe=df.head(num_lines),
+                step=step,
+            )
+
+            # log incorrect normalised predictions
+            df_incorrect = df[df["Norm Target"] != df["Norm Pred"]]
+            # log as a table with the appropriate headers
+            tracker.log_table(
+                table_name=f"incorrect_predictions/{prefix_pretty}-step-{cur_step_pretty}",
+                dataframe=df_incorrect.head(num_lines),
+                step=step,
+            )
 
 
 def convert_dataset_str_to_list(
@@ -773,7 +781,15 @@ def main():
         project_name=data_args.wandb_project,
         init_kwargs={
             "wandb": {"name": data_args.wandb_name,
-                      "dir": data_args.wandb_dir}
+                      "dir": data_args.wandb_dir},
+            "clearml": dict(
+                project_name=data_args.wandb_project,
+                task_name=data_args.wandb_name,
+                tags=None,
+                reuse_last_task_id=True,
+                continue_last_task=False,
+                auto_connect_frameworks={"pytorch": False} # do not upload model!
+            )
         }
     )
 
