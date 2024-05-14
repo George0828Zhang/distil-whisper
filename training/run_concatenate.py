@@ -330,10 +330,10 @@ def main():
             return "<|%.2f|>" % (int(s / p)*p)
         
         def get_timestamped_text(t, start, end):
-            if t.strip() == "":
+            t = t.strip()
+            if t == "":
                 return ""
-            t = re.sub(r"^([A-Za-z])", r" \1", t)
-            return f"{get_timestamp(start)}{t}{get_timestamp(end)}"
+            return f"{get_timestamp(start)} {t}{get_timestamp(end)}"
         
         def get_start(audio):
             from stable_whisper.stabilization.nonvad import audio2timings
