@@ -331,8 +331,6 @@ def main():
         
         def get_timestamped_text(t, start, end):
             t = t.strip()
-            if t == "":
-                return ""
             return f"{get_timestamp(start)} {t}{get_timestamp(end)}"
         
         def get_start(audio):
@@ -360,6 +358,9 @@ def main():
             prev_speaker = speaker_id[idx - 1]
             speaker = speaker_id[idx]
             sil_samples = np.random.rand() * sampling_rate * max_silence_in_seconds
+
+            if text[idx].strip() == "":
+                continue
 
             if len(audio_sample) + input_lengths[idx] + sil_samples <= max_input_length:
                 if speaker == prev_speaker:
