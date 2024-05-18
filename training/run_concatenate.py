@@ -24,7 +24,7 @@ import os
 import sys
 import random
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Literal
 
 import datasets
 import numpy as np
@@ -39,8 +39,7 @@ from datasets import (
 from huggingface_hub import HfFolder
 from transformers import HfArgumentParser
 from transformers.utils.versions import require_version
-from datasets_utils import save_to_disk_as_parquet
-
+from datasets_utils import save_to_disk_as_parquet, save_to_disk_as_files
 
 require_version("datasets>=2.14.6", "To fix: `pip install --upgrade datasets`")
 
@@ -154,6 +153,25 @@ class DataTrainingArguments:
             "help": "output dir."
         },
     )
+    output_format: Literal['dataset', 'files'] = field(
+        default="dataset",
+        metadata={
+            "help": "Format to save the new data. 'files' will save data into paired wav and vtt."
+        },
+    )
+    audio_format: str = field(
+        default=".wav",
+        metadata={
+            "help": "Format to save the audio data. Only used if output_format == 'files'."
+        },
+    )
+    text_format: str = field(
+        default=".vtt",
+        metadata={
+            "help": "Format to save the subtitle data. Only used if output_format == 'files'."
+        },
+    )
+
 
 
 def main():
@@ -236,6 +254,8 @@ def main():
     max_silence_in_seconds = data_args.max_silence_in_seconds
     augmentation_length_change = data_args.augmentation_length_change
     augmentation_noise_dir = data_args.augmentation_noise_dir
+    output_dir = data_args.output_dir
+    output_format = data_args.output_format
 
     logger.info("Random seed = %d", random_seed)
     logger.info("Random order = %s", randomize_same_speaker)
@@ -244,6 +264,7 @@ def main():
     if data_args.augmentation:
         logger.info("Length change = %s", augmentation_length_change)
         logger.info("Noise dir = %s", augmentation_noise_dir)
+    logger.info("Saving to = %s (%s)", output_dir, output_format)
         
 
     if data_args.overwrite_cache:
@@ -438,7 +459,13 @@ def main():
     )
 
     # this is where we'll save our transcriptions
-    save_to_disk_as_parquet(raw_datasets, data_args.output_dir, config_name="augment" if data_args.augmentation else "default", max_shard_size='1GB')
+    if output_format == "dataset":
+        save_to_disk_as_parquet(raw_datasets, output_dir, config_name="augment" if data_args.augmentation else "default", max_shard_size='1GB')
+    else:
+        column_names = dict(audio=audio_column_name, text=text_column_name, id=id_column_name)
+        formats = dict(audio=data_args.audio_format, text=data_args.text_format)
+        save_to_disk_as_files(raw_datasets, output_dir, column_names=column_names, formats=formats)
+
 
 if __name__ == "__main__":
     main()

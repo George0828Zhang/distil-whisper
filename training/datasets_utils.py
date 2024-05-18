@@ -1,11 +1,13 @@
+import re
+import yaml
+import soundfile as sf
 from datasets import DatasetDict
 from datasets import config
 from datasets.utils.py_utils import convert_file_size_to_int
 from datasets.table import embed_table_storage
 from tqdm import tqdm
 from pathlib import Path
-import yaml
-import re
+from webvtt import WebVTT, Caption
 
 def load_readme(path):
     with open(path, "r") as f:
@@ -72,3 +74,53 @@ def save_to_disk_as_parquet(dataset, data_dir, config_name="default", split='tra
     ):
         shard_path = data_dir / f"{split}-{index:05d}-of-{num_shards:05d}.parquet"
         shard.to_parquet(str(shard_path))
+
+
+def save_to_disk_as_files(dataset, data_dir, column_names = None, formats = None):
+    if not isinstance(data_dir, Path):
+        data_dir = Path(data_dir)
+    if isinstance(dataset, DatasetDict):
+        for split in dataset:
+            save_to_disk_as_files(dataset[split], data_dir / split, column_names)
+        return
+
+    if column_names is None:
+        column_names = {}
+    audio_column_name = column_names.get('audio', 'audio')
+    text_column_name = column_names.get('text', 'text')
+    id_column_name = column_names.get('id', 'id')
+
+    if formats is None:
+        formats = {}
+    audio_format = formats.get('audio', '.wav')
+    as_srt = 'srt' in formats.get('text', '.vtt')
+
+    if not audio_format.startswith('.'):
+        audio_format = '.' + audio_format
+
+    pattern = re.compile(r"<\|([\d.]+)\|>(.+?)<\|([\d.]+)\|>")
+    def timestamped_text_to_vtt(text):
+        to_ts = lambda x: Caption._to_timestamp(None, float(x))
+        return WebVTT(captions = [
+            Caption(
+                start=to_ts(m.group(1)),
+                text=m.group(2).strip(),
+                end=to_ts(m.group(3)),
+            )
+            for m in pattern.finditer(text)
+        ])
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    for sample in dataset:
+        prefix = data_dir / sample[id_column_name]
+        sf.write(
+            prefix.with_suffix(audio_format),
+            sample[audio_column_name]['array'],
+            samplerate=sample[audio_column_name]['sampling_rate'],
+        )
+        vtt = timestamped_text_to_vtt(sample[text_column_name])
+        if as_srt:
+            vtt.save_as_srt(prefix.with_suffix(".srt"))
+        else:
+            vtt.save(prefix.with_suffix(".vtt"))
