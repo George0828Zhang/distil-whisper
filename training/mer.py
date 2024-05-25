@@ -16,6 +16,7 @@ import re
 import datasets
 import jiwer
 import evaluate
+from sacrebleu.tokenizers.tokenizer_zh import TokenizerZh
 
 
 _CITATION = """\
@@ -73,34 +74,10 @@ Examples:
     0.5
 """
 
+tokenize = TokenizerZh()
 
 @evaluate.utils.file_utils.add_start_docstrings(_DESCRIPTION, _KWARGS_DESCRIPTION)
 class MER(evaluate.Metric):
-    transforms = jiwer.Compose([
-        jiwer.SubstituteRegexes({
-            r"(["
-            "\u3400-\u4db5"
-            "\u4e00-\u9fa5"
-            "\u9fa6-\u9fbb"
-            "\uf900-\ufa2d"
-            "\ufa30-\ufa6a"
-            "\ufa70-\ufad9"
-            "\u2e80-\u2eff"
-            "\u31c0-\u31ef"
-            "\u2f00-\u2fdf"
-            "\u2ff0-\u2fff"
-            "\u3100-\u312f"
-            "\u31a0-\u31bf"
-            "\ufe10-\ufe1f"
-            "\ufe30-\ufe4f"
-            "\u2600-\u26ff"
-            "\u2700-\u27bf"
-            "\u3200-\u32ff"
-            "\u3300-\u33ff"
-            r"])": r" \1"}),
-        jiwer.RemoveMultipleSpaces(),
-        jiwer.ReduceToListOfListOfWords()
-    ])
 
     def _info(self):
         return evaluate.MetricInfo(
@@ -121,12 +98,14 @@ class MER(evaluate.Metric):
 
     def _compute(self, predictions=None, references=None, concatenate_texts=False):
         if concatenate_texts:
-            return jiwer.process_words(references, predictions, self.transforms, self.transforms).wer
+            return jiwer.process_words(
+                reference=[tokenize(t) for t in references],
+                hypothesis=[tokenize(t) for t in prediction]).wer
         else:
             incorrect = 0
             total = 0
             for prediction, reference in zip(predictions, references):
-                measures = jiwer.process_words(reference, prediction, self.transforms, self.transforms)
+                measures = jiwer.process_words(reference=tokenize(reference), hypothesis=tokenize(prediction))
                 incorrect += measures.substitutions + measures.deletions + measures.insertions
                 total += measures.substitutions + measures.deletions + measures.hits
             return incorrect / total
